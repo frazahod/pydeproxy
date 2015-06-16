@@ -955,7 +955,8 @@ class DeproxyEndpoint:
                 resp = resp[0]
 
             if (resp.body is not None and
-                    'Content-Length' not in resp.headers):
+                    'Content-Length' not in resp.headers and
+                    resp.headers.get('Transfer-Encoding', '') != 'chunked'):
                 resp.headers.add('Content-Length', len(resp.body))
 
             if add_default_headers:
