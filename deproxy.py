@@ -1066,8 +1066,7 @@ class DeproxyEndpoint:
 
         persistent_connection = False
         if (version == 'HTTP/1.1' and
-                'Connection' in headers and
-                headers['Connection'] != 'close'):
+                headers.get('Connection', '') != 'close'):
             persistent_connection = True
 
         logger.debug('reading body')
