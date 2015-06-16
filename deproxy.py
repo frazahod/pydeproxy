@@ -908,7 +908,6 @@ class DeproxyEndpoint:
                         close_connection = True
             else:
                 close_connection = True
-            close_connection = True
 
             message_chain = None
             request_id = incoming_request.headers.get(request_id_header_name)
