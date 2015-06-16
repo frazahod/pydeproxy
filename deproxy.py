@@ -908,7 +908,6 @@ class DeproxyEndpoint:
                         close_connection = True
             else:
                 close_connection = True
-            close_connection = True
 
             message_chain = None
             request_id = incoming_request.headers.get(request_id_header_name)
@@ -956,7 +955,8 @@ class DeproxyEndpoint:
                 resp = resp[0]
 
             if (resp.body is not None and
-                    'Content-Length' not in resp.headers):
+                    'Content-Length' not in resp.headers and
+                    resp.headers.get('Transfer-Encoding', '') != 'chunked'):
                 resp.headers.add('Content-Length', len(resp.body))
 
             if add_default_headers:
@@ -1066,8 +1066,7 @@ class DeproxyEndpoint:
 
         persistent_connection = False
         if (version == 'HTTP/1.1' and
-                'Connection' in headers and
-                headers['Connection'] != 'close'):
+                headers.get('Connection', '') != 'close'):
             persistent_connection = True
 
         logger.debug('reading body')
