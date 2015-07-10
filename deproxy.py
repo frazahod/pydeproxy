@@ -70,7 +70,7 @@ class HeaderCollection(object):
         lower = key.lower()
         for i, header in enumerate(self.headers):
             if header[0].lower() == lower:
-                headers[i] = (header[0], value)
+                self.headers[i] = (header[0], value)
                 return
         else:
             self.add(key, value)
@@ -197,12 +197,7 @@ class Response:
         """
 
         if message is None:
-            if code in message_by_response_code:
-                message = message_by_response_code[code]
-            elif int(code) in message_by_response_code:
-                message = message_by_response_code[int(code)]
-            else:
-                message = ''
+            message = ''
 
         if headers is None:
             headers = {}
@@ -429,7 +424,7 @@ class Deproxy:
 
     def make_request(self, url, method='GET', headers=None, request_body='',
                      default_handler=None, handlers=None,
-                     add_default_headers=True):
+                     add_default_headers=True, ssl_options={}):
         """
         Make an HTTP request to the given url and return a MessageChain.
 
@@ -490,7 +485,7 @@ class Deproxy:
 
         request = Request(method, path, headers, request_body)
 
-        response = self.send_request(scheme, host, request)
+        response = self.send_request(scheme, host, request, ssl_options)
 
         self.remove_message_chain(request_id)
 
@@ -501,7 +496,8 @@ class Deproxy:
 
     def create_ssl_connection(self, address,
                               timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
-                              source_address=None):
+                              source_address=None,
+                              ssl_options={}):
         """
         Copied from the socket module and modified for ssl support.
 
@@ -525,7 +521,7 @@ class Deproxy:
             try:
                 sock = socket.socket(af, socktype, proto)
 
-                sock = ssl.wrap_socket(sock)
+                sock = ssl.wrap_socket(sock, **ssl_options)
 
                 if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
                     sock.settimeout(timeout)
@@ -542,9 +538,9 @@ class Deproxy:
         if err is not None:
             raise err
         else:
-            raise error("getaddrinfo returns an empty list")
+            raise Exception("getaddrinfo returns an empty list")
 
-    def send_request(self, scheme, host, request):
+    def send_request(self, scheme, host, request, ssl_options={}):
         """Send the given request to the host and return the Response."""
         logger.debug('sending request (scheme="%s", host="%s")' %
                      (scheme, host))
@@ -576,7 +572,7 @@ class Deproxy:
 
         address = (hostname, port)
         if scheme == 'https':
-            s = self.create_ssl_connection(address)
+            s = self.create_ssl_connection(address, ssl_options=ssl_options)
         else:
             s = socket.create_connection(address)
 
