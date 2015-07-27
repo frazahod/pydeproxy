@@ -373,8 +373,10 @@ class MessageChain:
                  self.orphaned_handlings))
 
 
-def read_body_from_stream(stream, headers):
-    if ('Transfer-Encoding' in headers and
+def read_body_from_stream(stream, headers, method):
+    if method == "HEAD":  # no body
+        body = None
+    elif ('Transfer-Encoding' in headers and
             headers['Transfer-Encoding'] not in ['identity', 'chunked']):
         # 2
         logger.debug('NotImplementedError - Transfer-Encoding not in "identity", "chunked"')
@@ -600,7 +602,7 @@ class Deproxy:
             logger.debug('  %s: %s', k, v)
 
         logger.debug('Reading body')
-        body = read_body_from_stream(rfile, response_headers)
+        body = read_body_from_stream(rfile, response_headers, request.method)
 
         logger.debug('Creating Response object')
         response = Response(code, message, response_headers, body)
@@ -1066,7 +1068,7 @@ class DeproxyEndpoint:
             persistent_connection = True
 
         logger.debug('reading body')
-        body = read_body_from_stream(rfile, headers)
+        body = read_body_from_stream(rfile, headers, method)
 
         logger.debug('returning')
         return (Request(method, path, headers, body), persistent_connection)
