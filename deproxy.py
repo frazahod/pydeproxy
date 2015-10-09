@@ -414,6 +414,7 @@ def read_body_from_stream(stream, headers, method):
                 line = line[:i]
             chunk_length = int(line, 16)
             if chunk_length == 0:
+                body = body + stream.read(2)
                 break
 
             body = body + stream.read(chunk_length)
@@ -495,7 +496,7 @@ class Deproxy:
         path = urlparse.urlunsplit(urlparts)
 
         logger.debug('request_body: "{0}"'.format(request_body))
-        if len(request_body) > 0:
+        if len(request_body) > 0 and headers.get('Transfer-Encoding', '') != 'chunked':
             headers.add('Content-Length', len(request_body))
 
         if add_default_headers:
@@ -918,7 +919,7 @@ class DeproxyEndpoint:
             ret = self.parse_request(rfile, wfile)
             logger.debug('returned from parse_request')
             if not ret:
-                return 1
+                return True
 
             (incoming_request, persistent_connection) = ret
 
@@ -1132,9 +1133,9 @@ class DeproxyEndpoint:
         if method == 'HEAD' or code < 200 or code in (204, 304):
             content = ''
 
-        response = Response(request_version, code, message, headers, content)
+        response = Response(code, message, headers, content)
 
-        self.send_response(response)
+        self.send_response(wfile, response)
 
     def send_response(self, wfile, response):
         """
