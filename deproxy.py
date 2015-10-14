@@ -12,6 +12,7 @@ import urlparse
 import inspect
 import logging
 import ssl
+import StringIO
 
 
 __version_info__ = (0, 9)
@@ -210,6 +211,28 @@ class Response:
         self.headers = HeaderCollection(headers)
         self.body = str(body)
 
+    @property
+    def body_text(self):
+        if 'Transfer-Encoding' in self.headers and self.headers['Transfer-Encoding'] == 'chunked':
+            input = StringIO.StringIO(self.body)
+            output = StringIO.StringIO()
+
+            while True:
+                line = input.readline()
+                i = line.find(';')  # ignore extenstions
+                if i >= 0:
+                    line = line[:i]
+                chunk_length = int(line, 16)
+                if chunk_length == 0:
+                    break
+
+                output.write(input.read(chunk_length))
+                input.read(2)  # remove CRLF
+
+            return output.getvalue()
+
+        return self.body
+
     def __repr__(self):
         return ('Response(code=%r, message=%r, headers=%r, body=%r)' %
                 (self.code, self.message, self.headers, self.body))
@@ -385,6 +408,7 @@ def read_body_from_stream(stream, headers, method):
         body = ""
         while True:
             line = stream.readline()
+            body = body + line
             i = line.find(';')  # ignore extenstions
             if i >= 0:
                 line = line[:i]
@@ -393,7 +417,7 @@ def read_body_from_stream(stream, headers, method):
                 break
 
             body = body + stream.read(chunk_length)
-            stream.read(2)  # remove CRLF
+            body = body + stream.read(2)  # remove CRLF
 
     elif 'Content-Length' in headers:
         # 3
