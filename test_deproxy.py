@@ -458,9 +458,17 @@ class TestBodies(unittest.TestCase):
         self.assertEqual(len(mc.handlings), 1)
         self.assertEqual(mc.handlings[0].response.body, body)
 
-    @unittest.expectedFailure
     def test_request_body_chunked(self):
-        self.fail()
+        data = ["0" * 16 for _ in xrange(10)] + [""]
+        body = "\r\n".join(map(lambda chunk: "%0.2X\r\n%s" % (len(chunk), chunk), data))
+        mc = self.deproxy.make_request(url=self.url, method='POST',
+                                       headers={"Transfer-Encoding": "chunked"},
+                                       request_body=body)
+
+        self.assertEqual(mc.sent_request.body, body)
+        self.assertEqual(mc.sent_request.headers.get("Content-Length"), None)
+        self.assertEqual(len(mc.handlings), 1)
+        self.assertEqual(mc.handlings[0].request.body, "".join(data))
 
     def test_response_body_chunked(self):
         chunked_body = "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"
