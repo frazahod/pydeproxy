@@ -3,16 +3,14 @@
 import threading
 import socket
 import time
-import collections
 import uuid
 import select
 import sys
-import mimetools
 import urlparse
-import inspect
 import logging
 import ssl
 import StringIO
+import requests
 
 
 __version_info__ = (0, 9)
@@ -178,7 +176,7 @@ class HeaderCollection(object):
         return self.headers.__repr__()
 
 
-class Response:
+class Response(object):
     """A simple HTTP Response, with status code, status message, headers, and
     body."""
     def __init__(self, code, message=None, headers=None, body=None):
@@ -332,7 +330,7 @@ def route(scheme, host, deproxy):
         request2.headers.add('Host', host)
 
         logger.debug('sending request')
-        response = deproxy.send_request(scheme, host, request2)
+        response = deproxy.send_request('%s://%s%s'% (scheme, host, request2.path), request2)
         logger.debug('received response')
 
         return response, False
@@ -451,7 +449,7 @@ class Deproxy:
 
     def make_request(self, url, method='GET', headers=None, request_body='',
                      default_handler=None, handlers=None,
-                     add_default_headers=True, ssl_options={}):
+                     add_default_headers=True, ssl_options={}, verify=False):
         """
         Make an HTTP request to the given url and return a MessageChain.
 
@@ -488,20 +486,12 @@ class Deproxy:
                                      handlers=handlers)
         self.add_message_chain(request_id, message_chain)
 
-        urlparts = list(urlparse.urlsplit(url, 'http'))
-        scheme = urlparts[0]
-        host = urlparts[1]
-        urlparts[0] = ''
-        urlparts[1] = ''
-        path = urlparse.urlunsplit(urlparts)
-
-        logger.debug('request_body: "{0}"'.format(request_body))
-        if len(request_body) > 0 and headers.get('Transfer-Encoding', '') != 'chunked':
-            headers.add('Content-Length', len(request_body))
+        parsed = urlparse.urlparse(url)
+        path = "{uri.path}?{uri.query}".format(uri=parsed)
 
         if add_default_headers:
             if 'Host' not in headers:
-                headers.add('Host', host)
+                headers.add('Host', parsed.netloc)
             if 'Accept' not in headers:
                 headers.add('Accept', '*/*')
             if 'Accept-Encoding' not in headers:
@@ -512,7 +502,7 @@ class Deproxy:
 
         request = Request(method, path, headers, request_body)
 
-        response = self.send_request(scheme, host, request, ssl_options)
+        response = self.send_request(url, request, ssl_options, verify)
 
         self.remove_message_chain(request_id)
 
@@ -521,116 +511,23 @@ class Deproxy:
 
         return message_chain
 
-    def create_ssl_connection(self, address,
-                              timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
-                              source_address=None,
-                              ssl_options={}):
-        """
-        Copied from the socket module and modified for ssl support.
-
-        Connect to *address* and return the socket object.
-
-        Convenience function.  Connect to *address* (a 2-tuple ``(host,
-        port)``) and return the socket object.  Passing the optional
-        *timeout* parameter will set the timeout on the socket instance
-        before attempting to connect.  If no *timeout* is supplied, the
-        global default timeout setting returned by :func:`getdefaulttimeout`
-        is used.  If *source_address* is set it must be a tuple of (host, port)
-        for the socket to bind as a source address before making the
-        connection. A host of '' or port 0 tells the OS to use the default.
-        """
-
-        host, port = address
-        err = None
-        for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
-            af, socktype, proto, canonname, sa = res
-            sock = None
-            try:
-                sock = socket.socket(af, socktype, proto)
-
-                sock = ssl.wrap_socket(sock, **ssl_options)
-
-                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
-                    sock.settimeout(timeout)
-                if source_address:
-                    sock.bind(source_address)
-                sock.connect(sa)
-                return sock
-
-            except socket.error as _:
-                err = _
-                if sock is not None:
-                    sock.close()
-
-        if err is not None:
-            raise err
-        else:
-            raise Exception("getaddrinfo returns an empty list")
-
-    def send_request(self, scheme, host, request, ssl_options={}):
+    def send_request(self, url, request, ssl_options={}, verify=False):
         """Send the given request to the host and return the Response."""
-        logger.debug('sending request (scheme="%s", host="%s")' %
-                     (scheme, host))
-        hostparts = host.split(':')
-        if len(hostparts) > 1:
-            port = hostparts[1]
-        else:
-            if scheme == 'https':
-                port = 443
+        logger.debug('sending request %s' % url)
+
+        cert = None
+        if "certfile" in ssl_options and "keyfile" in ssl_options:
+            cert = (ssl_options["certfile"], ssl_options["keyfile"])
+
+        headers = {}
+        for key, value in request.headers.iteritems():
+            if key in headers:
+                headers[key] = "%s, %s" % (headers[key], value)
             else:
-                port = 80
-        hostname = hostparts[0]
-        hostip = socket.gethostbyname(hostname)
+                headers[key] = value
 
-        request_line = '%s %s HTTP/1.1\r\n' % (request.method, request.path)
-        lines = [request_line]
-
-        for name, value in request.headers.iteritems():
-            lines.append('%s: %s\r\n' % (name, value))
-        lines.append('\r\n')
-        if request.body is not None and len(request.body) > 0:
-            lines.append(request.body)
-
-        #for line in lines:
-        #    logger.debug('  ' + line)
-
-        logger.debug('Creating connection (hostname="%s", port="%s")' %
-                     (hostname, str(port)))
-
-        address = (hostname, port)
-        if scheme == 'https':
-            s = self.create_ssl_connection(address, ssl_options=ssl_options)
-        else:
-            s = socket.create_connection(address)
-
-        s.send(''.join(lines))
-
-        rfile = s.makefile('rb', -1)
-
-        logger.debug('Reading response line')
-        response_line = rfile.readline(65537)
-        if (len(response_line) > 65536):
-            raise ValueError
-        response_line = response_line.rstrip('\r\n')
-        logger.debug('Response line is ok: %s' % response_line)
-
-        words = response_line.split()
-
-        proto = words[0]
-        code = words[1]
-        message = ' '.join(words[2:])
-
-        logger.debug('Reading headers')
-        response_headers = HeaderCollection.from_stream(rfile)
-        logger.debug('Headers ok')
-        for k,v in response_headers.iteritems():
-            logger.debug('  %s: %s', k, v)
-
-        logger.debug('Reading body')
-        body = read_body_from_stream(rfile, response_headers, request.method)
-
-        logger.debug('Creating Response object')
-        response = Response(code, message, response_headers, body)
+        res = requests.request(request.method, url, headers=headers, data=request.body, cert=cert, verify=verify)
+        response = Response(res.status_code, res.reason, res.headers, res.text)
 
         logger.debug('Returning Response object')
         return response

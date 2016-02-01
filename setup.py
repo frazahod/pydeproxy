@@ -1,14 +1,15 @@
 
-from distutils.core import setup
-import deproxy
+from setuptools import setup
+
 
 setup(
     name='deproxy',
-    version=deproxy.__version__,
+    version=open("VERSION").read().strip(),
     py_modules=['deproxy', ],
     license=open('LICENSE').read(),
     long_description=(open('README.rst').read() + '\n\n' +
                       open('HISTORY.rst').read()),
+    install_requires=["requests"],
     author='izrik',
     author_email='izrik@izrik.com',
     url='https://github.com/izrik/deproxy',
