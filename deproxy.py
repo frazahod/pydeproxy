@@ -508,7 +508,9 @@ class Deproxy:
             else:
                 headers[key] = value
 
-        res = requests.request(request.method, url, headers=headers, data=request.body, cert=cert, verify=verify)
+        with requests.Session() as s:
+            s.keep_alive = False
+            res = s.request(request.method, url, headers=headers, data=request.body, cert=cert, verify=verify)
         response = Response(res.status_code, res.reason, res.headers, res.text)
 
         logger.debug('Returning Response object')
