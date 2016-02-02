@@ -211,24 +211,6 @@ class Response(object):
 
     @property
     def body_text(self):
-        if 'Transfer-Encoding' in self.headers and self.headers['Transfer-Encoding'] == 'chunked':
-            input = StringIO.StringIO(self.body)
-            output = StringIO.StringIO()
-
-            while True:
-                line = input.readline()
-                i = line.find(';')  # ignore extenstions
-                if i >= 0:
-                    line = line[:i]
-                chunk_length = int(line, 16)
-                if chunk_length == 0:
-                    break
-
-                output.write(input.read(chunk_length))
-                input.read(2)  # remove CRLF
-
-            return output.getvalue()
-
         return self.body
 
     def __repr__(self):
@@ -330,7 +312,7 @@ def route(scheme, host, deproxy):
         request2.headers.add('Host', host)
 
         logger.debug('sending request')
-        response = deproxy.send_request('%s://%s%s'% (scheme, host, request2.path), request2)
+        response = deproxy.send_request('%s://%s%s' % (scheme, host, request2.path), request2)
         logger.debug('received response')
 
         return response, False
