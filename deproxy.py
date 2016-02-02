@@ -509,6 +509,8 @@ class Deproxy:
                 headers[key] = value
 
         with requests.Session() as s:
+            if not s.config:
+                s.config = {}
             s.config["keep_alive"] = False
             s.keep_alive = False
             res = s.request(request.method, url, headers=headers, data=request.body, cert=cert, verify=verify)
