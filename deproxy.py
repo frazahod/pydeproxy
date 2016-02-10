@@ -1,19 +1,21 @@
 #!/usr/bin/env python
 
-import threading
-import socket
-import time
-import uuid
-import select
-import sys
-import urlparse
 import logging
-import ssl
-import StringIO
+import sys
+import threading
+import time
+import urlparse
+import uuid
+import datetime
 import requests
 
+import tornado.ioloop
+import tornado.web
+import tornado.httpserver
 
-__version_info__ = (0, 9)
+from tornado import httputil
+
+__version_info__ = (1, 0)
 __version__ = '.'.join(map(str, __version_info__))
 
 
@@ -218,7 +220,7 @@ class Response(object):
                 (self.code, self.message, self.headers, self.body))
 
 
-class Request:
+class Request(object):
     """A simple HTTP Request, with method, path, headers, and body."""
     def __init__(self, method, path, headers=None, body=None):
         """
@@ -241,7 +243,7 @@ class Request:
         self.method = str(method)
         self.path = str(path)
         self.headers = HeaderCollection(headers)
-        self.body = str(body)
+        self.body = body
 
     def __repr__(self):
         return ('Request(method=%r, path=%r, headers=%r, body=%r)' %
@@ -322,7 +324,7 @@ def route(scheme, host, deproxy):
     return route_to_host
 
 
-class Handling:
+class Handling(object):
     """
     An object representing a request received by an endpoint and the
     response it returns.
@@ -337,7 +339,7 @@ class Handling:
                 (self.endpoint, self.request, self.response))
 
 
-class MessageChain:
+class MessageChain(object):
     """
     An object containing the initial request sent via the make_request method,
     and all request/response pairs (Handling objects) processed by
@@ -376,45 +378,7 @@ class MessageChain:
                  self.orphaned_handlings))
 
 
-def read_body_from_stream(stream, headers, method):
-    if method == "HEAD":  # no body
-        body = None
-    elif ('Transfer-Encoding' in headers and
-            headers['Transfer-Encoding'] not in ['identity', 'chunked']):
-        # 2
-        logger.debug('NotImplementedError - Transfer-Encoding not in "identity", "chunked"')
-        raise NotImplementedError
-    elif 'Transfer-Encoding' in headers and headers['Transfer-Encoding'] == 'chunked':
-        body = ""
-        while True:
-            line = stream.readline()
-            body = body + line
-            i = line.find(';')  # ignore extenstions
-            if i >= 0:
-                line = line[:i]
-            chunk_length = int(line, 16)
-            if chunk_length == 0:
-                body = body + stream.read(2)
-                break
-
-            body = body + stream.read(chunk_length)
-            body = body + stream.read(2)  # remove CRLF
-
-    elif 'Content-Length' in headers:
-        # 3
-        length = int(headers['Content-Length'])
-        body = stream.read(length)
-    elif False:
-        # multipart/byteranges ?
-        logger.debug('NotImplementedError - multipart/byteranges')
-        raise NotImplementedError
-    else:
-        # there is no body
-        body = None
-    return body
-
-
-class Deproxy:
+class Deproxy(object):
     """The main class."""
 
     def __init__(self, default_handler=None):
@@ -501,15 +465,27 @@ class Deproxy:
         if "certfile" in ssl_options and "keyfile" in ssl_options:
             cert = (ssl_options["certfile"], ssl_options["keyfile"])
 
-        headers = {}
-        for key, value in request.headers.iteritems():
-            if key in headers:
-                headers[key] = "%s, %s" % (headers[key], value)
-            else:
-                headers[key] = value
+
+        headers = pack_headers(request.headers)
+
+        get_data = lambda: request.body
+
+        if isinstance(request.body, list):
+            def get_data():
+                for chunk in request.body:
+                    yield chunk
+
+        elif headers.get("Transfer-Encoding") == "chunked" and isinstance(request.body, str):
+
+            def get_data():
+                parse_body = request.body.split("\r\n")
+
+                for i in xrange(len(parse_body) - 1):
+                    if (i + 1)%2 == 0:
+                        yield parse_body[i]
 
         res = requests.request(request.method, url, headers=headers,
-                               data=request.body,
+                               data=get_data(),
                                cert=cert, verify=verify,
                                stream=False)
         response = Response(res.status_code, res.reason, res.headers, res.text)
@@ -564,7 +540,7 @@ class Deproxy:
 
     def shutdown_all_endpoints(self):
         """Shutdown and remove all endpoints in use."""
-        logger.debug('')
+        logger.debug('Removing all endpoints')
         endpoints = []
         with self._endpoint_lock:
             endpoints = list(self._endpoints)
@@ -606,29 +582,8 @@ class Deproxy:
                 mc.add_orphaned_handling(handling)
 
 
-class DeproxyEndpoint:
-
+class DeproxyEndpoint(object):
     """A class that acts as a mock HTTP server."""
-
-    address_family = socket.AF_INET
-    socket_type = socket.SOCK_STREAM
-    request_queue_size = 5
-    _conn_number = 1
-    _conn_number_lock = threading.Lock()
-
-    # The default request version.  This only affects responses up until
-    # the point where the request line is parsed, so it mainly decides what
-    # the client gets back when sending a malformed request line.
-    # Most web servers default to HTTP 0.9, i.e. don't send a status line.
-    default_request_version = "HTTP/0.9"
-
-    # The version of the HTTP protocol we support.
-    # Set this to HTTP/1.1 to enable automatic keepalive
-    protocol_version = "HTTP/1.1"
-
-    # Disable nagle algoritm for this socket, if True.
-    # Use only when wbufsize != 0, to avoid small packets.
-    disable_nagle_algorithm = False
 
     def __init__(self, deproxy, port, name, hostname=None,
                  default_handler=None, ssl_enable=False, ssl_certs=None):
@@ -661,403 +616,151 @@ class DeproxyEndpoint:
         self.default_handler = default_handler
         self.ssl_enable = ssl_enable
         self.ssl_certs = ssl_certs
-
-        self.__is_shut_down = threading.Event()
-        self.__shutdown_request = False
-
-        self.socket = socket.socket(self.address_family,
-                                    self.socket_type)
-
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind((hostname, port))
-        self.socket_address = self.socket.getsockname()
-
-        self.fqdn = socket.getfqdn(self.socket_address[0])
-
-        self.socket.listen(self.request_queue_size)
+        self.ioloop = tornado.ioloop.IOLoop()
 
         thread_name = 'Thread-%s' % self.name
         self.server_thread = threading.Thread(target=self.serve_forever,
                                               name=thread_name)
+
+        self.start_event = threading.Event()
         self.server_thread.daemon = True
         self.server_thread.start()
+        self.start_event.wait(timeout=5)
 
-    def process_new_connection(self, request, client_address):
-        logger.debug('received request from %s' % str(client_address))
-        try:
-            connection = request
-            if self.disable_nagle_algorithm:
-                connection.setsockopt(socket.IPPROTO_TCP,
-                                      socket.TCP_NODELAY, True)
-            if self.ssl_enable:
-                connection = ssl.wrap_socket(
-                    connection,
-                    server_side=True,
-                    ssl_version=ssl.PROTOCOL_TLSv1,
-                    **self.ssl_certs)
-            rfile = connection.makefile('rb', -1)
-            wfile = connection.makefile('wb', 0)
+    def serve_forever(self):
+        self.ioloop.make_current()
 
-            try:
-                close = self.handle_one_request(rfile, wfile)
-                while not close:
-                    close = self.handle_one_request(rfile, wfile)
-            finally:
-                if not wfile.closed:
-                    wfile.flush()
-                wfile.close()
-                rfile.close()
-        except:
-            self.handle_error(request, client_address)
-        finally:
-            self.shutdown_request(request)
+        params = {}
 
-    def shutdown_request(self, request):
-        """Called to shutdown and close an individual request."""
-        logger.debug('')
-        try:
-            #explicitly shutdown.  socket.close() merely releases
-            #the socket and waits for GC to perform the actual close.
-            request.shutdown(socket.SHUT_WR)
-        except socket.error:
-            pass  # some platforms may raise ENOTCONN here
-        request.close()
+        if self.ssl_enable:
+            params["ssl_options"] = self.ssl_certs
+        app = self.make_app()
 
-    def serve_forever(self, poll_interval=0.5):
-        """Handle one request at a time until shutdown.
+        self.server = tornado.httpserver.HTTPServer(app, **params)
+        self.server.listen(self.port, address=self.hostname)
+        self.ioloop.add_callback(lambda: self.start_event.set())
+        self.ioloop.start()
 
-        Polls for shutdown every poll_interval seconds. Ignores
-        self.timeout. If you need to do periodic tasks, do them in
-        another thread.
-        """
-        logger.debug('')
-        self.__is_shut_down.clear()
-        try:
-            while not self.__shutdown_request:
-                # XXX: Consider using another file descriptor or
-                # connecting to the socket to wake this up instead of
-                # polling. Polling reduces our responsiveness to a
-                # shutdown request and wastes cpu at all other times.
-                r, w, e = select.select([self.socket], [], [], poll_interval)
-                if self.socket in r:
-                    try:
-                        request, client_address = self.socket.accept()
-                    except socket.error:
-                        return
-
-                    try:
-                        with self._conn_number_lock:
-                            t = threading.Thread(
-                                target=self.process_new_connection,
-                                name=("Thread - Connection %i on %s" %
-                                      (self._conn_number, self.name)),
-                                args=(request, client_address))
-                            self._conn_number += 1
-                        t.daemon = True
-                        t.start()
-
-                    except:
-                        self.handle_error(request, client_address)
-                        self.shutdown_request(request)
-
-        finally:
-            self.socket.close()
-            self.__shutdown_request = False
-            self.__is_shut_down.set()
+    def make_app(self):
+        return tornado.web.Application([(r"/.*", AllMethodsHandler, dict(handler=self.handle_request)),])
 
     def shutdown(self):
-        """Stops the serve_forever loop.
-
-        Blocks until the loop has finished. This must be called while
-        serve_forever() is running in another thread, or it will
-        deadlock.
-        """
         logger.debug('Shutting down "%s"' % self.name)
-        self.deproxy._remove_endpoint(self)
-        self.__shutdown_request = True
-        self.__is_shut_down.wait()
+        self.ioloop.stop()
+        self.server.stop()
         self.server_thread.join(timeout=5)
-        logger.debug('Finished shutting down "%s"' % self.name)
+        self.deproxy._remove_endpoint(self)
 
-    def handle_error(self, request, client_address):
-        """Handle an error gracefully.  May be overridden.
-
-        The default is to print a traceback and continue.
-
-        """
-        logger.debug('')
-        print '-' * 40
-        print 'Exception happened during processing of request from',
-        print client_address
-        import traceback
-        traceback.print_exc()  # XXX But this goes to stderr!
-        print '-' * 40
-
-    def handle_one_request(self, rfile, wfile):
-        logger.debug('')
-        close_connection = True
-        try:
-            logger.debug('calling parse_request')
-            ret = self.parse_request(rfile, wfile)
-            logger.debug('returned from parse_request')
-            if not ret:
-                return True
-
-            (incoming_request, persistent_connection) = ret
-
-            if persistent_connection:
-                close_connection = False
-                conn_value = incoming_request.headers.get('connection')
-                if conn_value:
-                    if conn_value.lower() == 'close':
-                        close_connection = True
-            else:
-                close_connection = True
-
-            message_chain = None
-            request_id = incoming_request.headers.get(request_id_header_name)
-            if request_id:
-                logger.debug('The request has a request id: %s=%s' %
-                             (request_id_header_name, request_id))
-                message_chain = self.deproxy.get_message_chain(request_id)
-            else:
-                logger.debug('The request does not have a request id')
-
-            # Handler resolution:
-            #  1. Check the handlers mapping specified to ``make_request``
-            #    a. By reference
-            #    b. By name
-            #  2. Check the default_handler specified to ``make_request``
-            #  3. Check the default for this endpoint
-            #  4. Check the default for the parent Deproxy
-            #  5. Fallback to simple_handler
-            if (message_chain and message_chain.handlers is not None and
-                    self in message_chain.handlers):
-                handler = message_chain.handlers[self]
-            elif (message_chain and message_chain.handlers is not None and
-                  self.name in message_chain.handlers):
-                handler = message_chain.handlers[self.name]
-            elif message_chain and message_chain.default_handler is not None:
-                handler = message_chain.default_handler
-            elif self.default_handler is not None:
-                handler = self.default_handler
-            elif self.deproxy.default_handler is not None:
-                handler = self.deproxy.default_handler
-            else:
-                # last resort
-                handler = simple_handler
-
-            logger.debug('calling handler')
-            resp = handler(incoming_request)
-            logger.debug('returned from handler')
-
-            add_default_headers = True
-            if type(resp) == tuple:
-                logger.debug('Handler gave back a tuple: %s',
-                             (type(resp[0]), resp[1:]))
-                if len(resp) > 1:
-                    add_default_headers = resp[1]
-                resp = resp[0]
-
-            if (resp.body is not None and
-                    'Content-Length' not in resp.headers and
-                    resp.headers.get('Transfer-Encoding', '') != 'chunked'):
-                resp.headers.add('Content-Length', len(resp.body))
-
-            if add_default_headers:
-                if 'Server' not in resp.headers:
-                    resp.headers['Server'] = version_string
-                if 'Date' not in resp.headers:
-                    resp.headers['Date'] = self.date_time_string()
-            else:
-                logger.debug('Don\'t add default response headers.')
-
-            found = resp.headers.get(request_id_header_name)
-            if not found and request_id is not None:
-                resp.headers[request_id_header_name] = request_id
-
-            outgoing_response = resp
-
-            h = Handling(self, incoming_request, outgoing_response)
-            if message_chain:
-                message_chain.add_handling(h)
-            else:
-                self.deproxy.add_orphaned_handling(h)
-
-            self.send_response(wfile, resp)
-
-            wfile.flush()
-
-            if persistent_connection and not close_connection:
-                conn_value = incoming_request.headers.get('connection')
-                if conn_value:
-                    if conn_value.lower() == 'close':
-                        close_connection = True
-
-        except socket.timeout, e:
-            close_connection = True
-
-        return close_connection
-
-    def parse_request(self, rfile, wfile):
-        logger.debug('reading request line')
-        request_line = rfile.readline(65537)
-        if len(request_line) > 65536:
-            self.send_error(wfile, 414, None, self.default_request_version)
-            return ()
-        if not request_line:
-            return ()
-
-        request_line = request_line.rstrip('\r\n')
-        logger.debug('request line is ok: "%s"' % request_line)
-
-        if request_line[-2:] == '\r\n':
-            request_line = request_line[:-2]
-        elif request_line[-1:] == '\n':
-            request_line = request_line[:-1]
-        words = request_line.split()
-        if len(words) == 3:
-            [method, path, version] = words
-            if version[:5] != 'HTTP/':
-                self.send_error(wfile, 400, method,
-                                self.default_request_version,
-                                "Bad request version (%r)" % version)
-                return ()
-            try:
-                base_version_number = version.split('/', 1)[1]
-                version_number = base_version_number.split(".")
-                # RFC 2145 section 3.1 says there can be only one "." and
-                #   - major and minor numbers MUST be treated as
-                #      separate integers;
-                #   - HTTP/2.4 is a lower version than HTTP/2.13, which in
-                #      turn is lower than HTTP/12.3;
-                #   - Leading zeros MUST be ignored by recipients.
-                if len(version_number) != 2:
-                    raise ValueError
-                version_number = int(version_number[0]), int(version_number[1])
-            except (ValueError, IndexError):
-                self.send_error(wfile, 400, method,
-                                self.default_request_version,
-                                "Bad request version (%r)" % version)
-                return ()
-        elif len(words) == 2:
-            [method, path] = words
-            version = self.default_request_version
-            if method != 'GET':
-                self.send_error(wfile, 400, method,
-                                self.default_request_version,
-                                "Bad HTTP/0.9 request type (%r)" % method)
-                return ()
-        elif not words:
-            return ()
+    def handle_request(self, request_handler):
+        incoming_request = Request(request_handler.request.method, request_handler.request.uri, request_handler.request.headers, request_handler.request.body)
+        message_chain = None
+        request_id = incoming_request.headers.get(request_id_header_name)
+        if request_id:
+            logger.debug('The request has a request id: %s=%s' %
+                         (request_id_header_name, request_id))
+            message_chain = self.deproxy.get_message_chain(request_id)
         else:
-            self.send_error(wfile, 400, None,
-                            self.default_request_version,
-                            "Bad request syntax (%r)" % request_line)
-            return ()
+            logger.debug('The request does not have a request id')
 
-        logger.debug('checking HTTP protocol version')
-        if (version != 'HTTP/1.1' and
-                version != 'HTTP/1.0' and
-                version != 'HTTP/0.9'):
-            self.send_error(wfile, 505, method, self.default_request_version,
-                            "Invalid HTTP Version (%s)" % version)
-            return ()
+        # Handler resolution:
+        #  1. Check the handlers mapping specified to ``make_request``
+        #    a. By reference
+        #    b. By name
+        #  2. Check the default_handler specified to ``make_request``
+        #  3. Check the default for this endpoint
+        #  4. Check the default for the parent Deproxy
+        #  5. Fallback to simple_handler
+        if (message_chain and message_chain.handlers is not None and
+                    self in message_chain.handlers):
+            handler = message_chain.handlers[self]
+        elif (message_chain and message_chain.handlers is not None and
+                      self.name in message_chain.handlers):
+            handler = message_chain.handlers[self.name]
+        elif message_chain and message_chain.default_handler is not None:
+            handler = message_chain.default_handler
+        elif self.default_handler is not None:
+            handler = self.default_handler
+        elif self.deproxy.default_handler is not None:
+            handler = self.deproxy.default_handler
+        else:
+            # last resort
+            handler = simple_handler
 
-        logger.debug('parsing headers')
-        headers = HeaderCollection.from_stream(rfile)
-        for k, v in headers.iteritems():
-            logger.debug('  {0}: "{1}"'.format(k, v))
+        logger.debug('calling handler')
+        resp = handler(incoming_request)
+        logger.debug('returned from handler')
 
-        persistent_connection = False
-        if (version == 'HTTP/1.1' and
-                headers.get('Connection', '') != 'close'):
-            persistent_connection = True
+        add_default_headers = True
+        if type(resp) == tuple:
+            logger.debug('Handler gave back a tuple: %s',
+                         (type(resp[0]), resp[1:]))
+            if len(resp) > 1:
+                add_default_headers = resp[1]
+            resp = resp[0]
 
-        logger.debug('reading body')
-        body = read_body_from_stream(rfile, headers, method)
+        if add_default_headers:
+            if 'Server' not in resp.headers:
+                resp.headers['Server'] = version_string
+            if 'Date' not in resp.headers:
+                resp.headers['Date'] = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+        else:
+            logger.debug('Don\'t add default response headers.')
 
-        logger.debug('returning')
-        return (Request(method, path, headers, body), persistent_connection)
+        found = resp.headers.get(request_id_header_name)
+        if not found and request_id is not None:
+            resp.headers[request_id_header_name] = request_id
 
-    def send_error(self, wfile, code, method, request_version, message=None):
-        """Send and log an error reply.
+        outgoing_response = resp
 
-        Arguments are the error code, and a detailed message.
-        The detailed message defaults to the short entry matching the
-        response code.
+        h = Handling(self, incoming_request, outgoing_response)
+        if message_chain:
+            message_chain.add_handling(h)
+        else:
+            self.deproxy.add_orphaned_handling(h)
 
-        This sends an error response (so it must be called before any
-        output has been generated), logs the error, and finally sends
-        a piece of HTML explaining the error to the user.
-
-        """
-
-        try:
-            short, long = messages_by_response_code[code]
-        except KeyError:
-            short, long = '???', '???'
-        if message is None:
-            message = short
-        explain = long
-        error_message_format = ("Error code %(code)d.\nMessage: %(message)s.\n"
-                                "Error code explanation: %(code)s = "
-                                "%(explain)s.")
-        content = (error_message_format %
-                   {'code': code, 'message': message,
-                    'explain': explain})
-
-        headers = {
-            'Content-Type': "text/html",
-            'Connection': 'close',
-        }
-
-        if method == 'HEAD' or code < 200 or code in (204, 304):
-            content = ''
-
-        response = Response(code, message, headers, content)
-
-        self.send_response(wfile, response)
-
-    def send_response(self, wfile, response):
-        """
-        Send the given Response over the socket. Add Server and Date headers
-        if not already present.
-        """
-
-        message = response.message
-        if message is None:
-            if response.code in messages_by_response_code:
-                message = messages_by_response_code[response.code][0]
+        response_code = int(resp.code)
+        request_handler.set_status(response_code, resp.message)
+        headers = pack_headers(resp.headers)
+        for name, value in headers.iteritems():
+            request_handler.set_header(name, value)
+        if response_code >= 200 and response_code != 204 and response_code != 304:
+            limit = resp.headers.get("Content-Length")
+            if limit is not None:
+                body = resp.body[:int(limit)]
             else:
-                message = ''
-        wfile.write("HTTP/1.1 %s %s\r\n" %
-                    (response.code, message))
+                body = resp.body
+            request_handler.write(body)
+        request_handler.finish()
 
-        for name, value in response.headers.iteritems():
-            wfile.write("%s: %s\r\n" % (name, value))
-        wfile.write("\r\n")
 
-        if response.body is not None and len(response.body) > 0:
-            logger.debug('Send the response body, len: %s',
-                         len(response.body))
-            wfile.write(response.body)
+class AllMethodsHandler(tornado.web.RequestHandler):
 
-    def date_time_string(self, timestamp=None):
-        """Return the current date and time formatted for a message header."""
-        if timestamp is None:
-            timestamp = time.time()
-        year, month, day, hh, mm, ss, wd, y, z = time.gmtime(timestamp)
+    def initialize(self, handler):
+        methods = ["get", "post", "put", "patch", "options", "delete", "head"]
 
-        weekdayname = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-        monthname = [None,
-                     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        def handle(*args, **kwargs):
+            handler(self)
 
-        s = "%s, %02d %3s %4d %02d:%02d:%02d GMT" % (weekdayname[wd], day,
-                                                     monthname[month], year,
-                                                     hh, mm, ss)
-        return s
+        for method in methods:
+            setattr(self, method, handle)
+
+    def clear(self):
+        self._headers = httputil.HTTPHeaders({})
+        self.set_default_headers()
+        self._write_buffer = []
+        self._status_code = 200
+        self._reason = messages_by_response_code[200][0]
+
+
+def pack_headers(request_headers):
+    headers = {}
+    for key, value in request_headers.iteritems():
+        if key in headers:
+            headers[key] = "%s, %s" % (headers[key], value)
+        else:
+            headers[key] = value
+
+    return headers
 
 
 # Table mapping response codes to messages; entries have the
