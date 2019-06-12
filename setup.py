@@ -9,7 +9,7 @@ setup(
     license=open('LICENSE').read(),
     long_description=(open('README.rst').read() + '\n\n' +
                       open('HISTORY.rst').read()),
-    install_requires=["requests", "tornado"],
+    install_requires=["requests", "tornado==5.1"],
     author='izrik',
     author_email='izrik@izrik.com',
     url='https://github.com/izrik/deproxy',
