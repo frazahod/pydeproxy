@@ -394,7 +394,7 @@ class Deproxy(object):
         self.default_handler = default_handler
 
     def make_request(self, url, method='GET', headers=None, request_body='',
-                     default_handler=None, handlers=None, requestor=None,
+                     default_handler=None, handlers=None, requester=None,
                      add_default_headers=True, ssl_options={}, verify=False):
         """
         Make an HTTP request to the given url and return a MessageChain.
@@ -448,8 +448,8 @@ class Deproxy(object):
 
         request = Request(method, path, headers, request_body)
 
-        if requestor:
-            response = requestor.send_request(url, request, ssl_options, verify)
+        if requester:
+            response = requester.send_request(url, request, ssl_options, verify)
         else:
             response = self.send_request(url, request, ssl_options, verify)
 
