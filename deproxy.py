@@ -394,7 +394,7 @@ class Deproxy(object):
         self.default_handler = default_handler
 
     def make_request(self, url, method='GET', headers=None, request_body='',
-                     default_handler=None, handlers=None,
+                     default_handler=None, handlers=None, requestor=None,
                      add_default_headers=True, ssl_options={}, verify=False):
         """
         Make an HTTP request to the given url and return a MessageChain.
@@ -448,7 +448,10 @@ class Deproxy(object):
 
         request = Request(method, path, headers, request_body)
 
-        response = self.send_request(url, request, ssl_options, verify)
+        if requestor:
+            response = requestor.send_request(url, request, ssl_options, verify)
+        else:
+            response = self.send_request(url, request, ssl_options, verify)
 
         self.remove_message_chain(request_id)
 
@@ -494,7 +497,7 @@ class Deproxy(object):
         return response
 
     def add_endpoint(self, port, name=None, hostname=None,
-                     default_handler=None, ssl_enable=False,
+                     default_handler=None, responder=None, set_reserved_headers=True, ssl_enable=False,
                      ssl_certs=None):
         """Add a DeproxyEndpoint object to this Deproxy object's list of
         endpoints, giving it the specified server address, and then return the
@@ -522,6 +525,8 @@ class Deproxy(object):
             endpoint = DeproxyEndpoint(self, port=port, name=name,
                                        hostname=hostname,
                                        default_handler=default_handler,
+                                       responder=responder,
+                                       set_reserved_headers=set_reserved_headers,
                                        ssl_enable=ssl_enable,
                                        ssl_certs=ssl_certs)
             self._endpoints.append(endpoint)
@@ -586,7 +591,7 @@ class DeproxyEndpoint(object):
     """A class that acts as a mock HTTP server."""
 
     def __init__(self, deproxy, port, name, hostname=None,
-                 default_handler=None, ssl_enable=False, ssl_certs=None):
+                 default_handler=None, responder=None, set_reserved_headers=True, ssl_enable=False, ssl_certs=None):
         """
         Initialize a DeproxyEndpoint
 
@@ -614,6 +619,8 @@ class DeproxyEndpoint(object):
         self.port = port
         self.hostname = hostname
         self.default_handler = default_handler
+        self.responder = responder
+        self.set_reserved_headers = set_reserved_headers
         self.ssl_enable = ssl_enable
         self.ssl_certs = ssl_certs
         self.ioloop = tornado.ioloop.IOLoop()
@@ -718,6 +725,12 @@ class DeproxyEndpoint(object):
         else:
             self.deproxy.add_orphaned_handling(h)
 
+        if self.responder:
+            wfile = request_handler.detach()
+            self.responder.send_response(wfile, resp)
+            return
+
+        request_handler.clear()
         response_code = int(resp.code)
         request_handler.set_status(response_code, resp.message)
         headers = pack_headers(resp.headers)
@@ -730,6 +743,11 @@ class DeproxyEndpoint(object):
             else:
                 body = resp.body
             request_handler.write(body)
+        if not self.set_reserved_headers:
+            future = request_handler.flush()
+            wfile = request_handler.detach()  # Stop tornado from adding required headers like Content-Lenth and Etag
+            wfile.close()
+            return
         request_handler.finish()
 
 
