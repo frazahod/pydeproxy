@@ -302,6 +302,10 @@ def route(scheme, host, deproxy):
     """
     logger.debug('')
 
+    def route_request(url, request):
+        return requests.request(request.method, url, headers=pack_headers(request.headers),
+                           data=request.body)
+
     def route_to_host(request):
         logger.debug('scheme, host = %s, %s' % (scheme, host))
         logger.debug('request = %s %s' % (request.method, request.path))
@@ -314,7 +318,9 @@ def route(scheme, host, deproxy):
         request2.headers.add('Host', host)
 
         logger.debug('sending request')
-        response = deproxy.send_request('%s://%s%s' % (scheme, host, request2.path), request2)
+        res = route_request('%s://%s%s' % (scheme, host, request2.path), request2)
+        res.headers['Content-Encoding'] = 'identity' # requests library already unpacked body
+        response = Response(res.status_code, res.reason, res.headers, res.text.encode('utf-8'))
         logger.debug('received response')
 
         return response, False
