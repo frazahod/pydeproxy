@@ -1,3 +1,5 @@
+This adds connections functionality analagous to what is available in the rackerlabs version, and fixes some issues and oversights from the smira version.
+
 =======
 Deproxy
 =======
